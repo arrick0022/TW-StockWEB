@@ -1,20 +1,30 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { checkAuth } from '@/lib/auth';
-import { getStocks, getStatus, getSettings, getTodayAlerts } from '@/lib/storage';
+import { authenticate, isAuthFailure } from '@/lib/auth';
+import { getStatus, getStocksOf, getTodayAlertsOf } from '@/lib/storage';
 
 export const dynamic = 'force-dynamic';
 
 export async function GET(req: NextRequest) {
-  const denied = checkAuth(req);
-  if (denied) return denied;
   try {
-    const [stocks, status, settings, alerts] = await Promise.all([
-      getStocks(),
+    const auth = await authenticate(req);
+    if (isAuthFailure(auth)) return auth;
+
+    const [stocks, status, alerts] = await Promise.all([
+      getStocksOf(auth.user),
       getStatus(),
-      getSettings(),
-      getTodayAlerts(),
+      getTodayAlertsOf(auth.user),
     ]);
-    return NextResponse.json({ stocks, status, settings, alerts });
+    return NextResponse.json({
+      user: auth.user,
+      isAdmin: auth.isAdmin,
+      settings: {
+        email_to: auth.profile.email_to,
+        threshold_ratio: auth.profile.threshold_ratio,
+      },
+      stocks,
+      status,
+      alerts,
+    });
   } catch (err) {
     return NextResponse.json(
       { error: '讀取資料失敗', detail: String(err) },

@@ -1,16 +1,30 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { Alert, Settings, Status, Stock } from '@/lib/storage';
+import type { Alert, Status, Stock } from '@/lib/storage';
 
-const KEY_STORAGE = 'twstock_admin_key';
+const KEY_STORAGE = 'twstock_login';
 const POLL_MS = 5000;
 
 interface ApiData {
+  user: string;
+  isAdmin: boolean;
+  settings: { email_to: string; threshold_ratio: number };
   stocks: Stock[];
   status: Status | null;
-  settings: Settings;
   alerts: Alert[];
+}
+
+interface UserRow {
+  username: string;
+  email_to: string;
+  threshold_ratio: number;
+  created?: string;
+}
+
+interface Credentials {
+  user: string;
+  pass: string;
 }
 
 const MKT_LABEL: Record<string, string> = {
@@ -33,9 +47,9 @@ function fmtTime(iso?: string | null): string {
 }
 
 export default function Home() {
-  const [adminKey, setAdminKey] = useState('');
-  const [keyInput, setKeyInput] = useState('');
-  const [authed, setAuthed] = useState(false);
+  const [cred, setCred] = useState<Credentials | null>(null);
+  const [userInput, setUserInput] = useState('');
+  const [passInput, setPassInput] = useState('');
   const [loginMsg, setLoginMsg] = useState('');
   const [data, setData] = useState<ApiData | null>(null);
   const [addCode, setAddCode] = useState('');
@@ -45,14 +59,22 @@ export default function Home() {
   const [ratioPct, setRatioPct] = useState('2');
   const [settingsMsg, setSettingsMsg] = useState<{ text: string; ok: boolean } | null>(null);
   const settingsLoaded = useRef(false);
+  // 帳號管理（admin）
+  const [userList, setUserList] = useState<UserRow[]>([]);
+  const [newUser, setNewUser] = useState('');
+  const [newPass, setNewPass] = useState('');
+  const [newEmail, setNewEmail] = useState('');
+  const [userMsg, setUserMsg] = useState<{ text: string; ok: boolean } | null>(null);
 
   const api = useCallback(
-    async (path: string, init: RequestInit = {}, key?: string) => {
+    async (path: string, init: RequestInit = {}, c?: Credentials) => {
+      const use = c ?? cred;
       const res = await fetch(path, {
         ...init,
         headers: {
           'Content-Type': 'application/json',
-          'x-admin-key': key ?? adminKey,
+          'x-user': use?.user ?? '',
+          'x-pass': use?.pass ?? '',
           ...init.headers,
         },
         cache: 'no-store',
@@ -61,52 +83,70 @@ export default function Home() {
       if (!res.ok) throw new Error(json.error ?? `HTTP ${res.status}`);
       return json;
     },
-    [adminKey]
+    [cred]
   );
 
   const refresh = useCallback(
-    async (key?: string) => {
-      const json = (await api('/api/status', {}, key)) as ApiData;
+    async (c?: Credentials) => {
+      const json = (await api('/api/status', {}, c)) as ApiData;
       setData(json);
       if (!settingsLoaded.current) {
         settingsLoaded.current = true;
         setEmailTo(json.settings.email_to);
-        setRatioPct(String(json.settings.threshold_ratio * 100));
+        setRatioPct(String(Math.round(json.settings.threshold_ratio * 1000) / 10));
       }
       return json;
     },
     [api]
   );
 
-  // 自動登入（localStorage 有存密碼就直接試）
+  const refreshUsers = useCallback(
+    async (c?: Credentials) => {
+      try {
+        const json = await api('/api/users', {}, c);
+        setUserList(json.users ?? []);
+      } catch {
+        // 非 admin 會 403，忽略
+      }
+    },
+    [api]
+  );
+
+  // 自動登入（localStorage 有存就直接試）
   useEffect(() => {
     const saved = localStorage.getItem(KEY_STORAGE);
     if (!saved) return;
-    refresh(saved)
-      .then(() => {
-        setAdminKey(saved);
-        setAuthed(true);
-      })
-      .catch(() => localStorage.removeItem(KEY_STORAGE));
+    try {
+      const c = JSON.parse(saved) as Credentials;
+      refresh(c)
+        .then((d) => {
+          setCred(c);
+          if (d.isAdmin) refreshUsers(c);
+        })
+        .catch(() => localStorage.removeItem(KEY_STORAGE));
+    } catch {
+      localStorage.removeItem(KEY_STORAGE);
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // 每 5 秒輪詢狀態
   useEffect(() => {
-    if (!authed) return;
+    if (!cred) return;
     const t = setInterval(() => {
       refresh().catch(() => {});
     }, POLL_MS);
     return () => clearInterval(t);
-  }, [authed, refresh]);
+  }, [cred, refresh]);
 
   async function login() {
     setLoginMsg('');
+    const c = { user: userInput.trim(), pass: passInput };
     try {
-      await refresh(keyInput);
-      localStorage.setItem(KEY_STORAGE, keyInput);
-      setAdminKey(keyInput);
-      setAuthed(true);
+      const d = await refresh(c);
+      localStorage.setItem(KEY_STORAGE, JSON.stringify(c));
+      setCred(c);
+      if (d.isAdmin) refreshUsers(c);
     } catch (e) {
       setLoginMsg(e instanceof Error ? e.message : '登入失敗');
     }
@@ -156,29 +196,66 @@ export default function Home() {
         body: JSON.stringify({ email_to: emailTo, threshold_ratio: ratio }),
       });
       setSettingsMsg({ text: '已儲存（監控端 30 秒內生效）', ok: true });
+      await refresh();
     } catch (e) {
       setSettingsMsg({ text: e instanceof Error ? e.message : '儲存失敗', ok: false });
     }
   }
 
+  async function createUser() {
+    setUserMsg(null);
+    try {
+      const r = await api('/api/users', {
+        method: 'POST',
+        body: JSON.stringify({ username: newUser, password: newPass, email_to: newEmail }),
+      });
+      setUserMsg({
+        text: r.updated ? `已重設「${newUser.trim()}」的密碼` : `已建立帳號「${newUser.trim()}」`,
+        ok: true,
+      });
+      setNewUser('');
+      setNewPass('');
+      setNewEmail('');
+      await refreshUsers();
+    } catch (e) {
+      setUserMsg({ text: e instanceof Error ? e.message : '建立失敗', ok: false });
+    }
+  }
+
+  async function removeUser(username: string) {
+    if (!confirm(`確定要刪除帳號「${username}」嗎？其監控清單也會一併刪除。`)) return;
+    try {
+      await api(`/api/users?username=${encodeURIComponent(username)}`, { method: 'DELETE' });
+      await refreshUsers();
+    } catch (e) {
+      alert(e instanceof Error ? e.message : '刪除失敗');
+    }
+  }
+
   function logout() {
     localStorage.removeItem(KEY_STORAGE);
-    setAuthed(false);
-    setAdminKey('');
+    setCred(null);
     setData(null);
+    setUserList([]);
     settingsLoaded.current = false;
   }
 
   // ── 登入畫面 ──────────────────────────────────────────────
-  if (!authed) {
+  if (!cred) {
     return (
       <div className="login-box">
         <h1 style={{ color: '#1a3a5c' }}>📈 台股盤中巨量監控</h1>
         <input
+          placeholder="帳號"
+          value={userInput}
+          autoCapitalize="none"
+          onChange={(e) => setUserInput(e.target.value)}
+        />
+        <input
           type="password"
-          placeholder="管理密碼"
-          value={keyInput}
-          onChange={(e) => setKeyInput(e.target.value)}
+          placeholder="密碼"
+          value={passInput}
+          onChange={(e) => setPassInput(e.target.value)}
           onKeyDown={(e) => e.key === 'Enter' && login()}
         />
         <button onClick={login}>登入</button>
@@ -195,6 +272,12 @@ export default function Home() {
   const rowByCode = new Map((status?.rows ?? []).map((r) => [r.code, r]));
   const stocks = data?.stocks ?? [];
   const alerts = data?.alerts ?? [];
+  const ratio = data?.settings.threshold_ratio ?? 0.02;
+  // 每檔今日最近一次觸發時間（alerts 由新到舊）
+  const lastAlertByCode = new Map<string, string>();
+  for (const a of alerts) {
+    if (!lastAlertByCode.has(a.code)) lastAlertByCode.set(a.code, a.time);
+  }
 
   return (
     <>
@@ -206,6 +289,7 @@ export default function Home() {
               ? `● 雲端監控執行中（${fmtTime(status?.updated)} 更新）`
               : '○ 監控未執行（交易日 08:55 雲端自動啟動）'}
           </span>
+          <span className="badge">👤 {data?.user}</span>
           <button className="btn-plain" style={{ fontSize: 12, padding: '4px 10px' }} onClick={logout}>
             登出
           </button>
@@ -213,8 +297,7 @@ export default function Home() {
       </div>
       <div className="infobar">
         資料來源：證交所 / 櫃買中心即時 API｜觸發條件：5秒成交量 ≥ 5日均量 ×{' '}
-        {(Number(status?.threshold_ratio ?? data?.settings.threshold_ratio ?? 0.02) * 100).toFixed(1)}
-        %｜觸發時自動寄 Email
+        {(ratio * 100).toFixed(1)}%｜觸發時自動寄 Email
       </div>
 
       <div className="container">
@@ -239,7 +322,7 @@ export default function Home() {
 
         {/* 監控清單 */}
         <div className="card">
-          <h2>監控清單（{stocks.length} 檔）</h2>
+          <h2>我的監控清單（{stocks.length} 檔）</h2>
           <div className="table-wrap">
             <table>
               <thead>
@@ -258,6 +341,16 @@ export default function Home() {
               <tbody>
                 {stocks.map((s) => {
                   const r = rowByCode.get(s.code);
+                  const threshold =
+                    r?.ok && r.avg_vol
+                      ? Math.round(r.avg_vol * ratio * (s.yf_only ? 12 : 1))
+                      : 0;
+                  const spiking =
+                    monitorOn &&
+                    !!status?.market_open &&
+                    threshold > 0 &&
+                    (r?.delta ?? 0) >= threshold;
+                  const lastAlert = lastAlertByCode.get(s.code);
                   const cls =
                     r?.ok && r.change !== undefined
                       ? r.change > 0
@@ -267,12 +360,12 @@ export default function Home() {
                           : 'flat'
                       : 'flat';
                   let stText = '—';
-                  if (r?.spike) stText = '⚠ 巨量！';
-                  else if (r?.last_spike) stText = `⚠ 曾觸發 ${fmtTime(r.last_spike)}`;
+                  if (spiking) stText = '⚠ 巨量！';
+                  else if (lastAlert) stText = `⚠ 曾觸發 ${fmtTime(lastAlert)}`;
                   else if (r?.ok) stText = r.delayed ? '正常（延遲15分）' : '正常';
                   else if (monitorOn) stText = '無資料';
                   return (
-                    <tr key={s.code} className={r?.spike ? 'spike' : ''}>
+                    <tr key={s.code} className={spiking ? 'spike' : ''}>
                       <td>
                         <a
                           className="stock-link"
@@ -297,7 +390,7 @@ export default function Home() {
                           : '—'}
                       </td>
                       <td>{r?.ok && r.delta ? r.delta.toLocaleString() : '—'}</td>
-                      <td>{r?.ok && r.threshold ? r.threshold.toLocaleString() : '—'}</td>
+                      <td>{threshold > 0 ? threshold.toLocaleString() : '—'}</td>
                       <td style={{ fontSize: 12 }}>{stText}</td>
                       <td>
                         <button className="btn-del" onClick={() => removeStock(s)}>
@@ -321,7 +414,7 @@ export default function Home() {
             💡 點股票名稱可開啟 Yahoo 即時行情頁
           </p>
           {!monitorOn && (
-            <p className="dim" style={{ marginTop: 8 }}>
+            <p className="dim">
               非監控時段，報價為最後一次更新的內容；清單修改隨時都會儲存。
             </p>
           )}
@@ -341,9 +434,9 @@ export default function Home() {
           ))}
         </div>
 
-        {/* 設定 */}
+        {/* 通知設定 */}
         <div className="card">
-          <h2>通知設定</h2>
+          <h2>我的通知設定</h2>
           <div className="row" style={{ marginBottom: 8 }}>
             <span style={{ fontSize: 14 }}>收件人（逗號分隔多個）：</span>
             <input
@@ -370,6 +463,72 @@ export default function Home() {
             )}
           </div>
         </div>
+
+        {/* 帳號管理（admin 專用） */}
+        {data?.isAdmin && (
+          <div className="card">
+            <h2>帳號管理（admin）</h2>
+            <div className="table-wrap" style={{ marginBottom: 12 }}>
+              <table>
+                <thead>
+                  <tr>
+                    <th>帳號</th>
+                    <th>收件人</th>
+                    <th>門檻</th>
+                    <th></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {userList.map((u) => (
+                    <tr key={u.username}>
+                      <td>
+                        <b>{u.username}</b>
+                      </td>
+                      <td className="dim">{u.email_to || '—'}</td>
+                      <td>{(u.threshold_ratio * 100).toFixed(1)}%</td>
+                      <td>
+                        {u.username !== 'admin' && (
+                          <button className="btn-del" onClick={() => removeUser(u.username)}>
+                            刪除
+                          </button>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <div className="row">
+              <input
+                style={{ width: 130 }}
+                placeholder="帳號（英數）"
+                value={newUser}
+                autoCapitalize="none"
+                onChange={(e) => setNewUser(e.target.value)}
+              />
+              <input
+                style={{ width: 130 }}
+                type="password"
+                placeholder="密碼（6字以上）"
+                value={newPass}
+                onChange={(e) => setNewPass(e.target.value)}
+              />
+              <input
+                style={{ flex: 1, minWidth: 180 }}
+                placeholder="收件信箱（選填）"
+                value={newEmail}
+                onChange={(e) => setNewEmail(e.target.value)}
+              />
+              <button className="btn-add" onClick={createUser}>
+                建立 / 重設密碼
+              </button>
+              {userMsg && <span className={`msg ${userMsg.ok ? 'ok' : 'err'}`}>{userMsg.text}</span>}
+            </div>
+            <p className="dim" style={{ marginTop: 8 }}>
+              輸入已存在的帳號可重設其密碼；admin 自己的密碼在 Vercel 環境變數 ADMIN_PASSWORD 修改。
+            </p>
+          </div>
+        )}
 
         <div className="footer">
           雲端監控由 GitHub Actions 於每個交易日 08:55 自動啟動、13:30 收盤結束；本頁僅供管理與查看。

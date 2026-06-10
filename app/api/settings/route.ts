@@ -1,13 +1,15 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { checkAuth } from '@/lib/auth';
-import { saveSettings } from '@/lib/storage';
+import { authenticate, isAuthFailure } from '@/lib/auth';
+import { getUsers, saveUsers } from '@/lib/storage';
 
 export const dynamic = 'force-dynamic';
 
+// 更新自己的通知設定
 export async function POST(req: NextRequest) {
-  const denied = checkAuth(req);
-  if (denied) return denied;
   try {
+    const auth = await authenticate(req);
+    if (isAuthFailure(auth)) return auth;
+
     const body = await req.json();
     const emailTo = String(body.email_to ?? '').trim();
     const ratio = Number(body.threshold_ratio);
@@ -17,7 +19,10 @@ export async function POST(req: NextRequest) {
     if (!Number.isFinite(ratio) || ratio <= 0 || ratio >= 1) {
       return NextResponse.json({ error: '門檻比例須介於 0 與 1 之間' }, { status: 400 });
     }
-    await saveSettings({ email_to: emailTo, threshold_ratio: ratio });
+    const users = await getUsers();
+    const profile = users[auth.user] ?? { email_to: '', threshold_ratio: 0.02 };
+    users[auth.user] = { ...profile, email_to: emailTo, threshold_ratio: ratio };
+    await saveUsers(users);
     return NextResponse.json({ ok: true });
   } catch (err) {
     return NextResponse.json(

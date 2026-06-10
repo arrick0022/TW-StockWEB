@@ -1,10 +1,18 @@
 """
-台股盤中巨量監控（雲端無介面版）
+台股盤中巨量監控（雲端無介面版・多使用者）
 - 在 GitHub Actions 上每個交易日 09:00–13:30 連續執行
 - TWSE / TPEx 官方即時 API 每 5 秒輪詢，興櫃股以 yfinance 備援
-- 觸發「5秒成交量 ≥ 5日均量 × 門檻」時寄 Gmail 警報
-- 監控清單 / 即時狀態 / 警報記錄 透過 Upstash Redis 與管理網頁共用
-  （未設定 Redis 時退回讀取本機 stocks.json，可在自己電腦單機執行）
+- 每位使用者有自己的監控清單 / 收件信箱 / 門檻比例，
+  觸發「5秒成交量 ≥ 5日均量 × 門檻」時各自寄 Gmail 警報
+- 透過 Upstash Redis 與管理網頁共用資料
+  （未設定 Redis 時退回讀取本機 stocks.json 的單人模式）
+
+Redis 資料結構（與 lib/storage.ts 對應）：
+  twstock:users                 {username: {pw?, email_to, threshold_ratio}}
+  twstock:stocks:{user}         [{name, code, market, yf_only?}]
+  twstock:status                全域報價快照（門檻由網頁依各使用者比例計算）
+  twstock:alerts:{user}:{date}  該使用者今日警報記錄
+  twstock:alerted:{date}        {user: {code: [分鐘key]}} 防重複寄信
 
 用法：
     python monitor.py            # 正式執行（等到開盤、收盤自動結束）
@@ -28,9 +36,9 @@ import requests
 # ══════════════════════════════════════════════════════════════
 #  設定
 # ══════════════════════════════════════════════════════════════
-THRESHOLD_RATIO = 0.02     # 觸發門檻：5日均量 × 2%（可被網頁設定覆蓋）
-CHECK_INTERVAL  = 5        # 查詢間隔（秒）
-WATCHLIST_REFRESH = 30     # 每隔幾秒從 Redis 重讀監控清單
+DEFAULT_RATIO    = 0.02    # 預設門檻：5日均量 × 2%（每位使用者可自訂）
+CHECK_INTERVAL   = 5       # 查詢間隔（秒）
+REFRESH_INTERVAL = 30      # 每隔幾秒從 Redis 重讀使用者與清單
 
 TW_TZ        = ZoneInfo("Asia/Taipei")
 MARKET_OPEN  = datetime.time(9, 0)
@@ -55,11 +63,13 @@ NOTIFY_EMAIL       = os.environ.get("NOTIFY_EMAIL", GMAIL_USER)
 REDIS_URL   = os.environ.get("UPSTASH_REDIS_REST_URL", "").rstrip("/")
 REDIS_TOKEN = os.environ.get("UPSTASH_REDIS_REST_TOKEN", "")
 
-KEY_STOCKS   = "twstock:stocks"
-KEY_STATUS   = "twstock:status"
-KEY_SETTINGS = "twstock:settings"
-KEY_ALERTS   = "twstock:alerts:{date}"
-KEY_ALERTED  = "twstock:alerted:{date}"
+KEY_USERS        = "twstock:users"
+KEY_STOCKS_OF    = "twstock:stocks:{user}"
+KEY_STATUS       = "twstock:status"
+KEY_ALERTS_OF    = "twstock:alerts:{user}:{date}"
+KEY_ALERTED      = "twstock:alerted:{date}"
+KEY_LEGACY_STOCKS   = "twstock:stocks"
+KEY_LEGACY_SETTINGS = "twstock:settings"
 
 
 def log(msg: str):
@@ -73,6 +83,10 @@ def now_tw() -> datetime.datetime:
 def is_market_open() -> bool:
     t = now_tw()
     return t.weekday() < 5 and MARKET_OPEN <= t.time() <= MARKET_CLOSE
+
+
+def today_str() -> str:
+    return now_tw().strftime("%Y%m%d")
 
 
 # ══════════════════════════════════════════════════════════════
@@ -128,21 +142,21 @@ def redis_expire(key: str, expire_sec: int):
 
 
 # ══════════════════════════════════════════════════════════════
-#  監控清單 / 設定
+#  使用者 / 清單載入（含舊版單人資料自動遷移）
 # ══════════════════════════════════════════════════════════════
-def load_watchlist() -> list:
-    """優先讀 Redis（網頁可即時增減）；沒有 Redis 時讀本機 stocks.json"""
-    if redis_enabled():
-        data = redis_get_json(KEY_STOCKS)
-        if isinstance(data, list):
-            return data
-        # Redis 還沒有清單：用 repo 內的 stocks.json 當種子寫入
-        seed = _load_local_stocks()
-        if seed:
-            redis_set_json(KEY_STOCKS, seed)
-            log(f"📋 已用 stocks.json 初始化 Redis 監控清單（{len(seed)} 檔）")
-        return seed
-    return _load_local_stocks()
+def normalize_profile(p: dict | None) -> dict:
+    p = p if isinstance(p, dict) else {}
+    out = {
+        "email_to": p.get("email_to") or NOTIFY_EMAIL,
+        "threshold_ratio": DEFAULT_RATIO,
+    }
+    try:
+        ratio = float(p.get("threshold_ratio", 0))
+        if 0 < ratio < 1:
+            out["threshold_ratio"] = ratio
+    except (TypeError, ValueError):
+        pass
+    return out
 
 
 def _load_local_stocks() -> list:
@@ -153,25 +167,47 @@ def _load_local_stocks() -> list:
         return []
 
 
-def save_watchlist(stocks: list):
-    if redis_enabled():
-        redis_set_json(KEY_STOCKS, stocks)
+def load_users() -> dict:
+    """回傳 {username: profile}。無 Redis 時為單人本機模式。"""
+    if not redis_enabled():
+        return {"admin": normalize_profile(None)}
+
+    users = redis_get_json(KEY_USERS)
+    if isinstance(users, dict) and users:
+        return {u: normalize_profile(p) for u, p in users.items()}
+
+    # ── 第一次跑多使用者版：把舊單人資料遷移成 admin 帳號 ──
+    legacy_settings = redis_get_json(KEY_LEGACY_SETTINGS)
+    admin = normalize_profile(legacy_settings)
+    redis_set_json(KEY_USERS, {"admin": {**admin, "created": now_tw().isoformat()}})
+
+    legacy_stocks = redis_get_json(KEY_LEGACY_STOCKS)
+    if isinstance(legacy_stocks, list) and legacy_stocks:
+        if redis_get_json(KEY_STOCKS_OF.format(user="admin")) is None:
+            redis_set_json(KEY_STOCKS_OF.format(user="admin"), legacy_stocks)
+        log(f"🔁 已將舊版監控清單（{len(legacy_stocks)} 檔）遷移給 admin 帳號")
+    log("🔁 已建立多使用者結構（admin）")
+    return {"admin": admin}
 
 
-def load_settings() -> dict:
-    s = {"email_to": NOTIFY_EMAIL, "threshold_ratio": THRESHOLD_RATIO}
+def load_stocks_of(user: str) -> list:
+    if not redis_enabled():
+        return _load_local_stocks()
+    data = redis_get_json(KEY_STOCKS_OF.format(user=user))
+    if isinstance(data, list):
+        return data
+    if user == "admin":
+        seed = _load_local_stocks()
+        if seed:
+            redis_set_json(KEY_STOCKS_OF.format(user="admin"), seed)
+            log(f"📋 已用 stocks.json 初始化 admin 監控清單（{len(seed)} 檔）")
+        return seed
+    return []
+
+
+def save_stocks_of(user: str, stocks: list):
     if redis_enabled():
-        data = redis_get_json(KEY_SETTINGS)
-        if isinstance(data, dict):
-            if data.get("email_to"):
-                s["email_to"] = data["email_to"]
-            try:
-                ratio = float(data.get("threshold_ratio", 0))
-                if 0 < ratio < 1:
-                    s["threshold_ratio"] = ratio
-            except (TypeError, ValueError):
-                pass
-    return s
+        redis_set_json(KEY_STOCKS_OF.format(user=user), stocks)
 
 
 # ══════════════════════════════════════════════════════════════
@@ -388,114 +424,115 @@ def send_email(name: str, code: str, price: float, change_pct: float,
 # ══════════════════════════════════════════════════════════════
 class Monitor:
     def __init__(self):
-        self.stocks: list = []
+        self.users: dict[str, dict] = {}        # username -> profile
+        self.user_stocks: dict[str, list] = {}  # username -> 清單
+        self.stock_info: dict[str, dict] = {}   # code -> {name, market, yf_only}（聯集）
+        # 全域 per-code 狀態
         self.avg_vol: dict[str, float] = {}
         self.prev_vol: dict[str, float | None] = {}
         self.last_price: dict[str, float] = {}
         self.yf_prev_close: dict[str, float] = {}
-        self.last_spike: dict[str, str] = {}      # code -> ISO 時間
-        self.alerted: dict[str, list] = {}        # code -> [分鐘 key]（防重複寄信）
-        self.settings = load_settings()
+        # 防重複寄信：{user: {code: [分鐘key]}}
+        self.alerted: dict[str, dict[str, list]] = {}
         self._last_refresh = 0.0
-        self._last_settings = 0.0
 
     # ── 初始化 ────────────────────────────────────────────────
     def setup(self):
-        self.stocks = load_watchlist()
-        log(f"📋 監控清單：{len(self.stocks)} 檔")
+        self._load_users_and_lists(initial=True)
+        n_codes = len(self.stock_info)
+        log(f"👥 使用者 {len(self.users)} 位｜監控股票聯集 {n_codes} 檔")
 
         # 載入今日已寄信記錄（備援 run 重啟時不重複寄）
         if redis_enabled():
-            key = KEY_ALERTED.format(date=now_tw().strftime("%Y%m%d"))
-            data = redis_get_json(key)
+            data = redis_get_json(KEY_ALERTED.format(date=today_str()))
             if isinstance(data, dict):
-                self.alerted = {c: list(v) for c, v in data.items()}
-                if self.alerted:
-                    log(f"📨 已載入今日寄信記錄（{sum(len(v) for v in self.alerted.values())} 筆）")
+                self.alerted = {
+                    u: {c: list(v) for c, v in (codes or {}).items()}
+                    for u, codes in data.items()
+                }
+                total = sum(len(v) for codes in self.alerted.values() for v in codes.values())
+                if total:
+                    log(f"📨 已載入今日寄信記錄（{total} 筆）")
 
-        changed = False
-        for s in self.stocks:
-            if not s.get("market"):
-                info = lookup_stock(s["code"]) or lookup_stock_yf(s["code"])
-                if info:
-                    s.update(info)
-                    log(f"🔍 {s['name']}（{s['code']}）偵測為 {info['market']}")
-                else:
-                    s["market"] = "otc"
-                    log(f"⚠️ {s['code']} 無法偵測市場，先當作上櫃")
-                changed = True
-        if changed:
-            save_watchlist(self.stocks)
-
-        self._init_stock_state(self.stocks)
+        self._init_codes(list(self.stock_info.keys()))
         log("✅ 初始化完成，開始監控")
 
-    def _init_stock_state(self, stocks: list):
+    def _load_users_and_lists(self, initial: bool = False):
+        """讀取所有使用者與其清單，偵測缺漏的市場欄位並回寫，重建聯集"""
+        self.users = load_users()
+        new_user_stocks: dict[str, list] = {}
+        for user in self.users:
+            stocks = load_stocks_of(user)
+            changed = False
+            for s in stocks:
+                if not s.get("market"):
+                    info = lookup_stock(s["code"]) or lookup_stock_yf(s["code"])
+                    if info:
+                        s.update(info)
+                        log(f"🔍 [{user}] {s['name']}（{s['code']}）偵測為 {info['market']}")
+                    else:
+                        s["market"] = "otc"
+                        log(f"⚠️ [{user}] {s['code']} 無法偵測市場，先當作上櫃")
+                    changed = True
+            if changed:
+                save_stocks_of(user, stocks)
+            new_user_stocks[user] = stocks
+        self.user_stocks = new_user_stocks
+
+        info: dict[str, dict] = {}
+        for stocks in self.user_stocks.values():
+            for s in stocks:
+                if s.get("market") and s["code"] not in info:
+                    info[s["code"]] = s
+        self.stock_info = info
+
+    def _init_codes(self, codes: list):
         """載入均量與昨收（新加入的股票也走這裡）"""
-        today = now_tw().strftime("%Y%m%d")
-        ratio = self.settings["threshold_ratio"]
-        for s in stocks:
-            code = s["code"]
+        for code in codes:
+            s = self.stock_info.get(code)
+            if not s:
+                continue
             self.prev_vol.setdefault(code, None)
-            self.alerted.setdefault(code, [])
             avg = get_avg_volume(code, s["market"])
             self.avg_vol[code] = avg
             mkt_label = {"tse": "上市", "otc": "上櫃", "emerging": "興櫃"}.get(s["market"], s["market"])
-            log(f"   {s['name']}（{mkt_label}）5日均量 {avg:,.0f} 張｜門檻 {avg * ratio:,.0f} 張")
+            log(f"   {s['name']}（{mkt_label}）5日均量 {avg:,.0f} 張")
             if s.get("yf_only"):
                 prev = fetch_yf_prev_close(code, s["market"])
                 if prev:
                     self.yf_prev_close[code] = prev
 
     # ── 清單 / 設定即時同步（網頁端改了會在 30 秒內生效）────────
-    def refresh_watchlist(self):
+    def refresh(self):
         if not redis_enabled():
             return
-        if time.time() - self._last_refresh < WATCHLIST_REFRESH:
+        if time.time() - self._last_refresh < REFRESH_INTERVAL:
             return
         self._last_refresh = time.time()
 
-        data = redis_get_json(KEY_STOCKS)
-        if not isinstance(data, list):
-            return
-        old_codes = {s["code"] for s in self.stocks}
-        new_codes = {s["code"] for s in data}
+        old_codes = set(self.stock_info.keys())
+        self._load_users_and_lists()
+        new_codes = set(self.stock_info.keys())
 
-        removed = old_codes - new_codes
-        for code in removed:
-            for d in (self.avg_vol, self.prev_vol, self.last_price,
-                      self.yf_prev_close, self.last_spike):
+        for code in old_codes - new_codes:
+            for d in (self.avg_vol, self.prev_vol, self.last_price, self.yf_prev_close):
                 d.pop(code, None)
-            log(f"➖ 已移除監控：{code}")
+            log(f"➖ 已無人監控，移除：{code}")
 
-        added = [s for s in data if s["code"] not in old_codes]
-        changed = False
-        for s in added:
-            if not s.get("market"):
-                info = lookup_stock(s["code"]) or lookup_stock_yf(s["code"])
-                if info:
-                    s.update(info)
-                else:
-                    s["market"] = "otc"
-                changed = True
-            log(f"➕ 新增監控：{s.get('name', s['code'])}（{s['code']}）")
-
-        self.stocks = data
-        if changed:
-            save_watchlist(self.stocks)
+        added = sorted(new_codes - old_codes)
         if added:
-            self._init_stock_state(added)
-
-        self.settings = load_settings()
+            for code in added:
+                s = self.stock_info[code]
+                log(f"➕ 新增監控：{s.get('name', code)}（{code}）")
+            self._init_codes(added)
 
     # ── 每 5 秒一輪 ───────────────────────────────────────────
     def tick(self, send_alerts: bool = True) -> list:
-        ready      = [s for s in self.stocks if s.get("market")]
+        ready      = [s for s in self.stock_info.values() if s.get("market")]
         mis_stocks = [s for s in ready if not s.get("yf_only")]
         data = fetch_quotes(mis_stocks)
         now  = now_tw()
         mkt  = is_market_open()
-        ratio = self.settings["threshold_ratio"]
         rows = []
 
         for s in ready:
@@ -532,46 +569,56 @@ class Monitor:
             self.prev_vol[code] = vol_lot
 
             avg = self.avg_vol.get(code, 0)
-            # yfinance 股 delta 為 1 分鐘量，門檻等比放大維持相同靈敏度
-            t_ratio   = ratio * 12 if s.get("yf_only") else ratio
-            threshold = avg * t_ratio
-            is_spike  = mkt and threshold > 0 and delta >= threshold
 
-            if is_spike and send_alerts:
-                key = now.strftime("%Y%m%d%H%M")
-                if key not in self.alerted.setdefault(code, []):
-                    self.alerted[code].append(key)
-                    self.last_spike[code] = now.isoformat()
-                    self._record_alert(name, code, price, change_pct, delta, threshold)
+            if mkt and send_alerts and avg > 0 and delta > 0:
+                self._check_user_alerts(s, price, change_pct, delta, avg, now)
 
             rows.append({
                 "code": code, "name": name, "market": s["market"],
                 "yf_only": bool(s.get("yf_only")), "ok": True,
                 "price": round(price, 2), "change": round(change, 2),
                 "pct": round(change_pct, 2),
-                "delta": round(delta), "threshold": round(threshold),
-                "spike": is_spike,
-                "last_spike": self.last_spike.get(code),
+                "delta": round(delta), "avg_vol": round(avg),
                 "delayed": bool(d.get("delayed")),
             })
         return rows
 
-    def _record_alert(self, name, code, price, change_pct, delta, threshold):
-        now = now_tw()
-        ok = send_email(name, code, price, change_pct, delta, threshold,
-                        self.settings["email_to"])
-        tag = "✉ Email 已寄出" if ok else "✗ Email 失敗"
-        log(f"⚠️ {name}（{code}）巨量觸發！5秒量={delta:,.0f}張 門檻={threshold:,.0f}張 {tag}")
-        if redis_enabled():
-            today = now.strftime("%Y%m%d")
-            redis_lpush_json(KEY_ALERTS.format(date=today), {
-                "time": now.isoformat(), "code": code, "name": name,
-                "price": round(price, 2), "pct": round(change_pct, 2),
-                "delta": round(delta), "threshold": round(threshold),
-                "emailed": ok,
-            })
-            redis_set_json(KEY_ALERTED.format(date=today), self.alerted)
-            redis_expire(KEY_ALERTED.format(date=today), 3 * 86400)
+    def _check_user_alerts(self, s: dict, price: float, change_pct: float,
+                           delta: float, avg: float, now: datetime.datetime):
+        """對每位有監控這檔的使用者，依各自門檻判斷並寄信"""
+        code, name = s["code"], s["name"]
+        minute_key = now.strftime("%Y%m%d%H%M")
+        dirty = False
+        for user, profile in self.users.items():
+            if not any(x["code"] == code for x in self.user_stocks.get(user, [])):
+                continue
+            ratio = profile["threshold_ratio"]
+            # yfinance 股 delta 為 1 分鐘量，門檻等比放大維持相同靈敏度
+            t_ratio   = ratio * 12 if s.get("yf_only") else ratio
+            threshold = avg * t_ratio
+            if threshold <= 0 or delta < threshold:
+                continue
+            user_alerted = self.alerted.setdefault(user, {}).setdefault(code, [])
+            if minute_key in user_alerted:
+                continue
+            user_alerted.append(minute_key)
+            dirty = True
+            ok = send_email(name, code, price, change_pct, delta, threshold,
+                            profile["email_to"])
+            tag = "✉ Email 已寄出" if ok else "✗ Email 失敗"
+            log(f"⚠️ [{user}] {name}（{code}）巨量觸發！"
+                f"5秒量={delta:,.0f}張 門檻={threshold:,.0f}張 {tag}")
+            if redis_enabled():
+                redis_lpush_json(KEY_ALERTS_OF.format(user=user, date=today_str()), {
+                    "time": now.isoformat(), "code": code, "name": name,
+                    "price": round(price, 2), "pct": round(change_pct, 2),
+                    "delta": round(delta), "threshold": round(threshold),
+                    "emailed": ok,
+                })
+        if dirty and redis_enabled():
+            key = KEY_ALERTED.format(date=today_str())
+            redis_set_json(key, self.alerted)
+            redis_expire(key, 3 * 86400)
 
     def publish_status(self, rows: list, running: bool):
         if not redis_enabled():
@@ -580,7 +627,6 @@ class Monitor:
             "updated": now_tw().isoformat(),
             "running": running,
             "market_open": is_market_open(),
-            "threshold_ratio": self.settings["threshold_ratio"],
             "rows": rows,
         })
 
@@ -602,7 +648,8 @@ def another_run_alive() -> bool:
 
 def main():
     once = "--once" in sys.argv
-    log(f"🚀 台股盤中巨量監控（雲端版）啟動  Redis={'ON' if redis_enabled() else 'OFF（本機模式）'}")
+    log(f"🚀 台股盤中巨量監控（雲端版・多使用者）啟動  "
+        f"Redis={'ON' if redis_enabled() else 'OFF（本機模式）'}")
 
     if once:
         m = Monitor()
@@ -613,7 +660,7 @@ def main():
         for r in rows:
             if r.get("ok"):
                 log(f"   {r['name']}({r['code']}) 價={r['price']} "
-                    f"漲跌={r['pct']:+.2f}% 量(張)累計可用 門檻={r['threshold']:,}")
+                    f"漲跌={r['pct']:+.2f}% 5日均量={r['avg_vol']:,}")
             else:
                 log(f"   {r['name']}({r['code']}) ❌ 無資料")
         return
@@ -651,7 +698,7 @@ def main():
             log("🏁 收盤，今日監控結束")
             break
         try:
-            m.refresh_watchlist()
+            m.refresh()
             rows = m.tick()
             m.publish_status(rows, running=True)
         except Exception as e:
