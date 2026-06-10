@@ -20,8 +20,8 @@ export async function POST(req: NextRequest) {
     if (stocks.some((s) => s.code === trimmed)) {
       return NextResponse.json({ error: `${trimmed} 已在監控清單中` }, { status: 400 });
     }
-    if (stocks.length >= 30) {
-      return NextResponse.json({ error: '監控清單最多 30 檔' }, { status: 400 });
+    if (stocks.length >= 100) {
+      return NextResponse.json({ error: '監控清單最多 100 檔' }, { status: 400 });
     }
     // 先試著查名稱與市場；查不到就留空，雲端監控腳本會在 30 秒內自動補偵測
     const info = await lookupStock(trimmed);

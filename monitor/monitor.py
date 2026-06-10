@@ -277,7 +277,15 @@ def get_avg_volume(code: str, market: str) -> float:
 
 
 def fetch_quotes(stocks: list) -> dict:
-    """TWSE MIS API 即時報價，回傳 {code: {...}}"""
+    """TWSE MIS API 即時報價，回傳 {code: {...}}。股票多時自動分批查詢。"""
+    result: dict = {}
+    BATCH = 50   # 單次查詢上限，避免網址過長被拒
+    for i in range(0, len(stocks), BATCH):
+        result.update(_fetch_quotes_batch(stocks[i:i + BATCH]))
+    return result
+
+
+def _fetch_quotes_batch(stocks: list) -> dict:
     if not stocks:
         return {}
     ex_ch = "|".join(f"{s['market']}_{s['code']}.tw" for s in stocks if s.get("market"))
