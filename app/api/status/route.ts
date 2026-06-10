@@ -10,25 +10,45 @@ import {
   type StatusRow,
   type Stock,
 } from '@/lib/storage';
-import { fetchMisQuotes, fetchYahooQuote, resolveStock, type LiveQuote } from '@/lib/twse';
+import {
+  fetchChineseName,
+  fetchMisQuotes,
+  fetchYahooQuote,
+  hasCJK,
+  resolveStock,
+  type LiveQuote,
+} from '@/lib/twse';
 
 export const dynamic = 'force-dynamic';
 
 const LOOKUP_RETRY_MS = 10 * 60 * 1000; // 待偵測股票每 10 分鐘重試一次
 const MAX_YF_LIVE = 10; // 即時補價時，興櫃股單檔查詢上限（避免拖慢回應）
 
-/** 「偵測中」的股票：每 10 分鐘自動重試（MIS → Yahoo），成功就寫回清單 */
+/**
+ * 自動補資料（每 10 分鐘重試一次，成功就寫回清單）：
+ * - 「偵測中」的股票：MIS → Yahoo 查市場與名稱
+ * - 名稱不是中文的股票（興櫃股 API 只給英文簡稱）：補抓中文名稱
+ */
 async function resolvePending(user: string, stocks: Stock[]): Promise<boolean> {
   const now = Date.now();
   const pending = stocks.filter(
-    (s) => !s.market && now - (s.lookup_at ?? 0) > LOOKUP_RETRY_MS
+    (s) =>
+      (!s.market || !hasCJK(s.name)) && now - (s.lookup_at ?? 0) > LOOKUP_RETRY_MS
   );
   if (pending.length === 0) return false;
   let changed = false;
   for (const s of pending.slice(0, 5)) {
-    const info = await resolveStock(s.code);
-    if (info) {
-      Object.assign(s, info);
+    if (!s.market) {
+      const info = await resolveStock(s.code);
+      if (info) {
+        Object.assign(s, info);
+      }
+    }
+    if (s.market && !hasCJK(s.name)) {
+      const zh = await fetchChineseName(s.code);
+      if (zh) s.name = zh;
+    }
+    if (s.market && hasCJK(s.name)) {
       delete s.lookup_at;
     } else {
       s.lookup_at = now;

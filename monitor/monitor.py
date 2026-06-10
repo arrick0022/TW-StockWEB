@@ -23,6 +23,7 @@ import datetime
 import json
 import math
 import os
+import re
 import smtplib
 import sys
 import time
@@ -237,6 +238,22 @@ def lookup_stock(code: str) -> dict | None:
     return None
 
 
+def has_cjk(s: str) -> bool:
+    return any("一" <= ch <= "鿿" for ch in (s or ""))
+
+
+def fetch_chinese_name(code: str) -> str | None:
+    """從 Yahoo 台灣版網頁標題抓中文名稱（興櫃股 API 只給英文簡稱）"""
+    try:
+        r = requests.get(f"https://tw.stock.yahoo.com/quote/{code}",
+                         headers=HEADERS, timeout=8)
+        m = re.search(r"<title>([^<(]+)\(", r.text)
+        name = m.group(1).strip() if m else ""
+        return name if name and has_cjk(name) else None
+    except Exception:
+        return None
+
+
 def lookup_stock_yf(code: str) -> dict | None:
     import yfinance as yf
     for suffix, mkt in [(".TWO", "otc"), (".TW", "tse")]:
@@ -244,10 +261,12 @@ def lookup_stock_yf(code: str) -> dict | None:
             df = yf.download(code + suffix, period="5d", interval="1d",
                              progress=False, auto_adjust=True)
             if df is not None and not df.empty:
-                try:
-                    name = yf.Ticker(code + suffix).info.get("shortName", "").strip()
-                except Exception:
-                    name = ""
+                name = fetch_chinese_name(code)
+                if not name:
+                    try:
+                        name = yf.Ticker(code + suffix).info.get("shortName", "").strip()
+                    except Exception:
+                        name = ""
                 return {"name": name or code, "code": code,
                         "market": mkt, "yf_only": True}
         except Exception:
@@ -445,6 +464,7 @@ class Monitor:
         self.alerted: dict[str, dict[str, list]] = {}
         # 最近觸發時間（跨日保留供顯示）：{user: {code: ISO 時間}}
         self.last_spike: dict[str, dict[str, str]] = {}
+        self._name_fix_tried: set[str] = set()   # 中文名稱補抓只試一次
         self._last_refresh = 0.0
 
     # ── 初始化 ────────────────────────────────────────────────
@@ -485,6 +505,15 @@ class Monitor:
                         s["market"] = "otc"
                         log(f"⚠️ [{user}] {s['code']} 無法偵測市場，先當作上櫃")
                     changed = True
+                # 名稱不是中文（興櫃股 API 只給英文簡稱）→ 補抓一次中文名
+                if s.get("market") and not has_cjk(s.get("name", "")) \
+                        and s["code"] not in self._name_fix_tried:
+                    self._name_fix_tried.add(s["code"])
+                    zh = fetch_chinese_name(s["code"])
+                    if zh:
+                        log(f"🈶 {s['code']} 名稱更新：{s.get('name')} → {zh}")
+                        s["name"] = zh
+                        changed = True
             if changed:
                 save_stocks_of(user, stocks)
             new_user_stocks[user] = stocks

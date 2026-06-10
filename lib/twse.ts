@@ -70,6 +70,27 @@ async function fetchChartMeta(symbol: string): Promise<ChartMeta | null> {
   }
 }
 
+export function hasCJK(s: string): boolean {
+  return /[一-鿿]/.test(s);
+}
+
+/** 從 Yahoo 台灣版網頁標題抓中文名稱（API 只給英文簡稱時用） */
+export async function fetchChineseName(code: string): Promise<string | null> {
+  try {
+    const res = await fetch(`https://tw.stock.yahoo.com/quote/${code}`, {
+      headers: UA,
+      signal: AbortSignal.timeout(6000),
+      cache: 'no-store',
+    });
+    const html = await res.text();
+    const m = html.match(/<title>([^<(]+)\(/);
+    const name = m?.[1]?.trim();
+    return name && hasCJK(name) ? name : null;
+  } catch {
+    return null;
+  }
+}
+
 /** MIS 查無時的備援：用 Yahoo 判斷市場（興櫃股多半掛 .TWO） */
 export async function lookupStockYahoo(code: string): Promise<LookupResult | null> {
   for (const [suffix, market] of [
@@ -78,7 +99,9 @@ export async function lookupStockYahoo(code: string): Promise<LookupResult | nul
   ] as const) {
     const meta = await fetchChartMeta(code + suffix);
     if (meta?.regularMarketPrice) {
-      return { name: meta.shortName?.trim() || code, code, market, yf_only: true };
+      const zhName = await fetchChineseName(code);
+      const name = zhName ?? meta.shortName?.trim() ?? code;
+      return { name, code, market, yf_only: true };
     }
   }
   return null;
