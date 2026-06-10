@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { authenticate, isAuthFailure } from '@/lib/auth';
-import { getStatus, getStocksOf, getTodayAlertsOf } from '@/lib/storage';
+import { getLastSpikeOf, getStatus, getStocksOf, getTodayAlertsOf } from '@/lib/storage';
 
 export const dynamic = 'force-dynamic';
 
@@ -9,10 +9,11 @@ export async function GET(req: NextRequest) {
     const auth = await authenticate(req);
     if (isAuthFailure(auth)) return auth;
 
-    const [stocks, status, alerts] = await Promise.all([
+    const [stocks, status, alerts, lastSpike] = await Promise.all([
       getStocksOf(auth.user),
       getStatus(),
       getTodayAlertsOf(auth.user),
+      getLastSpikeOf(auth.user),
     ]);
     return NextResponse.json({
       user: auth.user,
@@ -24,6 +25,7 @@ export async function GET(req: NextRequest) {
       stocks,
       status,
       alerts,
+      lastSpike,
     });
   } catch (err) {
     return NextResponse.json(

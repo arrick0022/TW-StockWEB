@@ -68,6 +68,7 @@ KEY_STOCKS_OF    = "twstock:stocks:{user}"
 KEY_STATUS       = "twstock:status"
 KEY_ALERTS_OF    = "twstock:alerts:{user}:{date}"
 KEY_ALERTED      = "twstock:alerted:{date}"
+KEY_LASTSPIKE_OF = "twstock:lastspike:{user}"   # {code: ISO 時間}，跨日保留供顯示
 KEY_LEGACY_STOCKS   = "twstock:stocks"
 KEY_LEGACY_SETTINGS = "twstock:settings"
 
@@ -442,6 +443,8 @@ class Monitor:
         self.yf_prev_close: dict[str, float] = {}
         # 防重複寄信：{user: {code: [分鐘key]}}
         self.alerted: dict[str, dict[str, list]] = {}
+        # 最近觸發時間（跨日保留供顯示）：{user: {code: ISO 時間}}
+        self.last_spike: dict[str, dict[str, str]] = {}
         self._last_refresh = 0.0
 
     # ── 初始化 ────────────────────────────────────────────────
@@ -485,6 +488,9 @@ class Monitor:
             if changed:
                 save_stocks_of(user, stocks)
             new_user_stocks[user] = stocks
+            if redis_enabled() and user not in self.last_spike:
+                data = redis_get_json(KEY_LASTSPIKE_OF.format(user=user))
+                self.last_spike[user] = data if isinstance(data, dict) else {}
         self.user_stocks = new_user_stocks
 
         info: dict[str, dict] = {}
@@ -611,6 +617,9 @@ class Monitor:
                 continue
             user_alerted.append(minute_key)
             dirty = True
+            self.last_spike.setdefault(user, {})[code] = now.isoformat()
+            if redis_enabled():
+                redis_set_json(KEY_LASTSPIKE_OF.format(user=user), self.last_spike[user])
             ok = send_email(name, code, price, change_pct, delta, threshold,
                             profile["email_to"])
             tag = "✉ Email 已寄出" if ok else "✗ Email 失敗"

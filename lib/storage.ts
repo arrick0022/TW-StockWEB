@@ -15,6 +15,7 @@ const KEYS = {
   stocksOf: (user: string) => `twstock:stocks:${user}`,
   status: 'twstock:status',
   alertsOf: (user: string, date: string) => `twstock:alerts:${user}:${date}`,
+  lastSpikeOf: (user: string) => `twstock:lastspike:${user}`,
   legacyStocks: 'twstock:stocks',
   legacySettings: 'twstock:settings',
 };
@@ -132,4 +133,10 @@ export async function getStatus(): Promise<Status | null> {
 export async function getTodayAlertsOf(user: string): Promise<Alert[]> {
   const data = await getRedis().lrange<Alert>(KEYS.alertsOf(user, todayTW()), 0, 199);
   return data ?? [];
+}
+
+/** 每檔最近一次觸發時間（跨日保留）：{code: ISO 時間} */
+export async function getLastSpikeOf(user: string): Promise<Record<string, string>> {
+  const data = await getRedis().get<Record<string, string>>(KEYS.lastSpikeOf(user));
+  return data ?? {};
 }

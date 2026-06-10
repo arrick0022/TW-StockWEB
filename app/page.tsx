@@ -13,6 +13,7 @@ interface ApiData {
   stocks: Stock[];
   status: Status | null;
   alerts: Alert[];
+  lastSpike: Record<string, string>;
 }
 
 interface UserRow {
@@ -44,6 +45,25 @@ function fmtTime(iso?: string | null): string {
     second: '2-digit',
     timeZone: 'Asia/Taipei',
   });
+}
+
+// 觸發時間：今天顯示 HH:MM，跨日顯示 MM/DD HH:MM（與桌面版一致）
+function fmtSpikeTime(iso: string): string {
+  const d = new Date(iso);
+  const dateTW = (x: Date) => x.toLocaleDateString('en-CA', { timeZone: 'Asia/Taipei' });
+  const hm = d.toLocaleTimeString('zh-TW', {
+    hour12: false,
+    hour: '2-digit',
+    minute: '2-digit',
+    timeZone: 'Asia/Taipei',
+  });
+  if (dateTW(d) === dateTW(new Date())) return hm;
+  const md = d.toLocaleDateString('zh-TW', {
+    month: '2-digit',
+    day: '2-digit',
+    timeZone: 'Asia/Taipei',
+  });
+  return `${md} ${hm}`;
 }
 
 export default function Home() {
@@ -273,10 +293,13 @@ export default function Home() {
   const stocks = data?.stocks ?? [];
   const alerts = data?.alerts ?? [];
   const ratio = data?.settings.threshold_ratio ?? 0.02;
-  // 每檔今日最近一次觸發時間（alerts 由新到舊）
+  // 每檔最近一次觸發時間：優先今日警報（由新到舊），其次跨日記錄
   const lastAlertByCode = new Map<string, string>();
-  for (const a of alerts) {
-    if (!lastAlertByCode.has(a.code)) lastAlertByCode.set(a.code, a.time);
+  for (const [code, t] of Object.entries(data?.lastSpike ?? {})) {
+    lastAlertByCode.set(code, t);
+  }
+  for (const a of [...alerts].reverse()) {
+    lastAlertByCode.set(a.code, a.time);
   }
 
   return (
@@ -361,7 +384,7 @@ export default function Home() {
                       : 'flat';
                   let stText = '—';
                   if (spiking) stText = '⚠ 巨量！';
-                  else if (lastAlert) stText = `⚠ 曾觸發 ${fmtTime(lastAlert)}`;
+                  else if (lastAlert) stText = `⚠ 曾觸發 ${fmtSpikeTime(lastAlert)}`;
                   else if (r?.ok) stText = r.delayed ? '正常（延遲15分）' : '正常';
                   else if (monitorOn) stText = '無資料';
                   return (
