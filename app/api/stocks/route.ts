@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { authenticate, isAuthFailure } from '@/lib/auth';
 import { getStocksOf, saveStocksOf, type Stock } from '@/lib/storage';
-import { lookupStock } from '@/lib/twse';
+import { resolveStock } from '@/lib/twse';
 
 export const dynamic = 'force-dynamic';
 
@@ -23,9 +23,15 @@ export async function POST(req: NextRequest) {
     if (stocks.length >= 100) {
       return NextResponse.json({ error: '監控清單最多 100 檔' }, { status: 400 });
     }
-    // 先試著查名稱與市場；查不到就留空，雲端監控腳本會在 30 秒內自動補偵測
-    const info = await lookupStock(trimmed);
-    const stock: Stock = info ?? { name: trimmed, code: trimmed, market: '' };
+    // 先查名稱與市場（MIS 優先、Yahoo 備援）；
+    // 查不到就留空，網頁端與雲端監控都會自動重試補偵測
+    const info = await resolveStock(trimmed);
+    const stock: Stock = info ?? {
+      name: trimmed,
+      code: trimmed,
+      market: '',
+      lookup_at: Date.now(),
+    };
     stocks.push(stock);
     await saveStocksOf(auth.user, stocks);
     return NextResponse.json({ ok: true, stock, pendingLookup: !info });

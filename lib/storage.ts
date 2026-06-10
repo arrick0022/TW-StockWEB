@@ -25,6 +25,7 @@ export interface Stock {
   code: string;
   market: string; // tse / otc / emerging / ''（待偵測）
   yf_only?: boolean;
+  lookup_at?: number; // 上次嘗試偵測市場的時間（ms），用來節流重試
 }
 
 export interface UserProfile {
