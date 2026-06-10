@@ -274,7 +274,15 @@ export default function Home() {
                   return (
                     <tr key={s.code} className={r?.spike ? 'spike' : ''}>
                       <td>
-                        <b>{s.name}</b> <span className="dim">{s.code}</span>
+                        <a
+                          className="stock-link"
+                          href={`https://tw.stock.yahoo.com/quote/${s.code}`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          title={`開啟 ${s.name} 的 Yahoo 行情頁`}
+                        >
+                          <b>{s.name}</b> <span className="dim">{s.code}</span>
+                        </a>
                       </td>
                       <td className="dim">{MKT_LABEL[s.market] ?? s.market}</td>
                       <td className={cls}>{r?.ok ? r.price?.toFixed(2) : '—'}</td>
@@ -309,6 +317,9 @@ export default function Home() {
               </tbody>
             </table>
           </div>
+          <p className="dim" style={{ marginTop: 8 }}>
+            💡 點股票名稱可開啟 Yahoo 即時行情頁
+          </p>
           {!monitorOn && (
             <p className="dim" style={{ marginTop: 8 }}>
               非監控時段，報價為最後一次更新的內容；清單修改隨時都會儲存。

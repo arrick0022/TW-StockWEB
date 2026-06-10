@@ -170,6 +170,16 @@ tr.spike td {
   background: #ffe0b2;
 }
 
+.stock-link {
+  color: inherit;
+  text-decoration: none;
+}
+
+.stock-link:hover b {
+  color: #1a5cb0;
+  text-decoration: underline;
+}
+
 .up {
   color: #cc2200;
   font-weight: 700;
