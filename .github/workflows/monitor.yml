@@ -1,0 +1,45 @@
+name: Taiwan Stock Monitor
+
+on:
+  schedule:
+    # GitHub cron 為 UTC；台灣時間 = UTC+8
+    - cron: '20 0 * * 1-5'   # 台灣 08:20 主要啟動（cron 常遲到，提早排）
+    - cron: '5 1 * * 1-5'    # 台灣 09:05 備援（主 run 沒起來時接手）
+    - cron: '0 3 * * 1-5'    # 台灣 11:00 備援（主 run 中途掛掉時接手）
+  workflow_dispatch:          # 手動觸發（測試用）
+    inputs:
+      mode:
+        description: '執行模式（once = 只抓一輪報價測試，不寄信）'
+        type: choice
+        options: [once, normal]
+        default: once
+
+concurrency:
+  group: stock-monitor
+  cancel-in-progress: false   # 備援 run 排隊等待；腳本自己會判斷該不該跑
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 340      # 08:20 啟動 → 收盤 13:31 約 5.2 小時
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+          cache-dependency-path: monitor/requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r monitor/requirements.txt
+
+      - name: Run stock monitor
+        env:
+          UPSTASH_REDIS_REST_URL: ${{ secrets.UPSTASH_REDIS_REST_URL }}
+          UPSTASH_REDIS_REST_TOKEN: ${{ secrets.UPSTASH_REDIS_REST_TOKEN }}
+          GMAIL_USER: ${{ secrets.GMAIL_USER }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          NOTIFY_EMAIL: ${{ secrets.NOTIFY_EMAIL }}
+        run: python monitor/monitor.py ${{ inputs.mode == 'once' && '--once' || '' }}

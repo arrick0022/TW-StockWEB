@@ -1,0 +1,90 @@
+[
+  {
+    "name": "台半",
+    "code": "5425",
+    "market": "otc"
+  },
+  {
+    "name": "恆勁",
+    "code": "6920",
+    "market": "otc",
+    "yf_only": true
+  },
+  {
+    "name": "川寶",
+    "code": "1595",
+    "market": "otc"
+  },
+  {
+    "name": "MBTC",
+    "code": "3184",
+    "market": "otc",
+    "yf_only": true
+  },
+  {
+    "name": "仁新",
+    "code": "6696",
+    "market": "otc",
+    "yf_only": true
+  },
+  {
+    "name": "雍智科技",
+    "code": "6683",
+    "market": "otc"
+  },
+  {
+    "name": "尖點",
+    "code": "8021",
+    "market": "tse"
+  },
+  {
+    "name": "大量",
+    "code": "3167",
+    "market": "tse"
+  },
+  {
+    "name": "精測",
+    "code": "6510",
+    "market": "otc"
+  },
+  {
+    "name": "旺矽",
+    "code": "6223",
+    "market": "otc"
+  },
+  {
+    "name": "華通",
+    "code": "2313",
+    "market": "tse"
+  },
+  {
+    "name": "合晶",
+    "code": "6182",
+    "market": "otc"
+  },
+  {
+    "name": "全球傳動",
+    "code": "4540",
+    "market": "tse"
+  },
+  {
+    "name": "宇隆",
+    "code": "2233",
+    "market": "tse"
+  },
+  {
+    "name": "台積電",
+    "code": "2330",
+    "market": "tse"
+  },
+  {
+    "name": "映泰",
+    "code": "2399",
+    "market": "tse"
+  },
+  {
+    "name": "祥碩",
+    "code": "5269",
+    "market": "tse"
+  }
+]
