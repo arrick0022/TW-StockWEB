@@ -1,0 +1,13 @@
+之前的台股監控程式 唯一缺點是需要開機才能運作 有沒有辦法解決? 比如寫成Next,js網頁之類的?或是其他方法?
+
+
+Lucky gmail.com
+czbe xqpu fnfz jxvf
+
+
+Upstash
+
+UPSTASH_REDIS_REST_URL="https://viable-bison-146399.upstash.io"
+UPSTASH_REDIS_REST_TOKEN="gQAAAAAAAjvfAAIgcDJhOGRkZmYwNjZiYzA0YTc1OWVkN2JlOWZhNmVjZmFlNg"
+
+密碼:shumin3592
