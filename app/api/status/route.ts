@@ -23,6 +23,7 @@ export const dynamic = 'force-dynamic';
 
 const LOOKUP_RETRY_MS = 10 * 60 * 1000; // 待偵測股票每 10 分鐘重試一次
 const MAX_YF_LIVE = 10; // 即時補價時，興櫃股單檔查詢上限（避免拖慢回應）
+const SNAPSHOT_STALE_MS = 2 * 60 * 1000; // 快照超過 2 分鐘視為過期，改用即時補價
 
 /**
  * 自動補資料（每 10 分鐘重試一次，成功就寫回清單）：
@@ -113,15 +114,40 @@ export async function GET(req: NextRequest) {
 
     await resolvePending(auth.user, stocks);
 
-    // 快照裡沒有報價的股票，即時補抓最後成交/收盤價
-    const have = new Set((status?.rows ?? []).map((r) => r.code));
-    const missing = stocks.filter((s) => s.market && !have.has(s.code));
-    const liveRows = await fetchLiveRows(missing);
+    // 快照新鮮（監控執行中）→ 只補快照缺漏的股票；
+    // 快照過期（非監控時段 / 監控掛掉）→ 全部改用即時報價，避免顯示舊價格
+    const oldRows = new Map((status?.rows ?? []).map((r) => [r.code, r]));
+    const snapshotFresh =
+      !!status?.updated &&
+      Date.now() - new Date(status.updated).getTime() < SNAPSHOT_STALE_MS;
+
+    const targets = snapshotFresh
+      ? stocks.filter((s) => s.market && !oldRows.has(s.code))
+      : stocks.filter((s) => s.market);
+    const liveRows = await fetchLiveRows(targets);
+
+    let rows;
+    if (snapshotFresh) {
+      rows = [...(status?.rows ?? []), ...liveRows];
+    } else {
+      // 即時價優先；抓不到的退回舊快照；門檻顯示沿用快照裡的均量
+      const liveByCode = new Map(liveRows.map((r) => [r.code, r]));
+      rows = stocks
+        .filter((s) => s.market)
+        .map((s) => {
+          const live = liveByCode.get(s.code);
+          const old = oldRows.get(s.code);
+          if (live?.ok) {
+            return { ...live, avg_vol: old?.avg_vol ?? 0, delta: 0 };
+          }
+          return old ?? live ?? { code: s.code, name: s.name, ok: false };
+        });
+    }
     const merged: Status = {
       updated: status?.updated ?? '',
       running: status?.running ?? false,
       market_open: status?.market_open ?? false,
-      rows: [...(status?.rows ?? []), ...liveRows],
+      rows,
     };
 
     return NextResponse.json({

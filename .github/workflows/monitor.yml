@@ -3,7 +3,8 @@ name: Taiwan Stock Monitor
 on:
   schedule:
     # GitHub cron 為 UTC；台灣時間 = UTC+8
-    - cron: '20 0 * * 1-5'   # 台灣 08:20 主要啟動（cron 常遲到，提早排）
+    # 注意：GitHub 排程不保證準時，另有 Vercel Cron（08:25）備援觸發
+    - cron: '15 0 * * 1-5'   # 台灣 08:15 主要啟動（cron 常遲到，提早排）
     - cron: '5 1 * * 1-5'    # 台灣 09:05 備援（主 run 沒起來時接手）
     - cron: '0 3 * * 1-5'    # 台灣 11:00 備援（主 run 中途掛掉時接手）
   workflow_dispatch:          # 手動觸發（測試用）
